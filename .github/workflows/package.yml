@@ -21,6 +21,31 @@ env:
   TAG: ${{ github.event.release.tag_name || inputs.tag }}
 
 jobs:
+  create-tag:
+    # Only run this job for direct pushes to the dev branch
+    if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git for pushing tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Create and push timestamp tag
+        id: create_tag
+        run: |
+          set -euo pipefail
+          TAG="auto-$(date -u +%Y%m%dT%H%M%SZ)"
+          echo "Creating tag $TAG"
+          git tag -a "$TAG" -m "Automated tag created by workflow"
+          git push origin "$TAG"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
   build-mac:
     strategy:
       fail-fast: false
