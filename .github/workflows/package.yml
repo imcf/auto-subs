@@ -158,12 +158,21 @@ jobs:
             FFMPEG_SRC="ffmpeg-x86_64-apple-darwin"
             FFPROBE_SRC="ffprobe-x86_64-apple-darwin"
           fi
+          # Download the appropriate archive from the ffmpeg-binaries repo using
+          # the GitHub Releases API (avoids relying on the `gh` CLI).
+          API_URL="https://api.github.com/repos/tmoroney/ffmpeg-binaries/releases/latest"
+          release_json=$(curl -s -H "Authorization: Bearer $GH_TOKEN" "$API_URL")
 
-          # Download the appropriate archive from the ffmpeg-binaries repo
-          gh release download \
-            --repo tmoroney/ffmpeg-binaries \
-            --pattern "$ZIP_NAME" \
-            --clobber
+          asset_id=$(echo "$release_json" | grep -B3 "\"name\": \"$ZIP_NAME\"" | grep '"id":' | head -n1 | sed -E 's/[^0-9]*([0-9]+).*/\1/')
+          if [ -z "$asset_id" ]; then
+            echo "ERROR: Could not find asset $ZIP_NAME in release assets" >&2
+            echo "Release JSON: $release_json" >&2
+            exit 1
+          fi
+
+          echo "Downloading $ZIP_NAME (asset id: $asset_id)"
+          curl -sL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/octet-stream" \
+            "https://api.github.com/repos/tmoroney/ffmpeg-binaries/releases/assets/$asset_id" -o "$ZIP_NAME"
 
           # Unzip directly into current folder (junk paths to avoid nested dirs)
           unzip -jo "$ZIP_NAME"
@@ -348,11 +357,19 @@ jobs:
           ZIP_NAME="ffmpeg-x86_64-unknown-linux-gnu.zip"
           FFMPEG_SRC="ffmpeg-x86_64-unknown-linux-gnu"
           FFPROBE_SRC="ffprobe-x86_64-unknown-linux-gnu"
+          API_URL="https://api.github.com/repos/tmoroney/ffmpeg-binaries/releases/latest"
+          release_json=$(curl -s -H "Authorization: Bearer $GH_TOKEN" "$API_URL")
 
-          gh release download \
-            --repo tmoroney/ffmpeg-binaries \
-            --pattern "$ZIP_NAME" \
-            --clobber
+          asset_id=$(echo "$release_json" | grep -B3 "\"name\": \"$ZIP_NAME\"" | grep '"id":' | head -n1 | sed -E 's/[^0-9]*([0-9]+).*/\1/')
+          if [ -z "$asset_id" ]; then
+            echo "ERROR: Could not find asset $ZIP_NAME in release assets" >&2
+            echo "Release JSON: $release_json" >&2
+            exit 1
+          fi
+
+          echo "Downloading $ZIP_NAME (asset id: $asset_id)"
+          curl -sL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/octet-stream" \
+            "https://api.github.com/repos/tmoroney/ffmpeg-binaries/releases/assets/$asset_id" -o "$ZIP_NAME"
 
           unzip -jo "$ZIP_NAME"
           chmod +x "$FFMPEG_SRC" "$FFPROBE_SRC"
@@ -427,30 +444,54 @@ jobs:
           fi
           mkdir -p latest
 
-          # Download signature files from the release assets
-          gh release download "$TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --pattern "AutoSubs-macos-aarch64.app.tar.gz.sig" \
-            --dir latest \
-            --clobber
+          # Helper: download a release asset by name for a given release tag
+          download_asset() {
+            repo="$1"; tag="$2"; name="$3"; outdir="$4"; required="$5"
+            mkdir -p "$outdir"
 
-          gh release download "$TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --pattern "AutoSubs-macos-x86_64.app.tar.gz.sig" \
-            --dir latest \
-            --clobber
+            release_json=$(curl -s -H "Authorization: Bearer $GH_TOKEN" "https://api.github.com/repos/$repo/releases/tags/$tag")
+            asset_id=$(echo "$release_json" | jq -r --arg NAME "$name" '.assets[] | select(.name==$NAME) | .id' 2>/dev/null || true)
 
-          gh release download "$TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --pattern "AutoSubs-windows-x86_64.exe.sig" \
-            --dir latest \
-            --clobber || true
+            if [ -z "$asset_id" ] || [ "$asset_id" = "null" ]; then
+              if [ "$required" = "true" ]; then
+                echo "ERROR: required asset '$name' not found in release $tag for $repo" >&2
+                echo "Release JSON: $release_json" >&2
+                exit 1
+              else
+                echo "Optional asset '$name' not found; continuing"
+                return 0
+              fi
+            fi
 
-          gh release download "$TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --pattern "AutoSubs-linux-x86_64.AppImage.sig" \
-            --dir latest \
-            --clobber || true
+            outpath="$outdir/$name"
+            tries=0
+            until [ $tries -ge 3 ]
+            do
+              tries=$((tries+1))
+              echo "Attempt $tries: downloading asset id $asset_id -> $outpath"
+              curl -sL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/octet-stream" \
+                "https://api.github.com/repos/$repo/releases/assets/$asset_id" -o "$outpath" && break || {
+                echo "Download attempt $tries failed for $name"
+                sleep $((tries * 2))
+              }
+            done
+
+            if [ ! -f "$outpath" ]; then
+              if [ "$required" = "true" ]; then
+                echo "ERROR: failed to download required asset $name" >&2
+                exit 1
+              else
+                echo "Optional asset $name missing after retries"
+                return 0
+              fi
+            fi
+          }
+
+          # Download the signature files we need (mac: required, windows/linux: optional)
+          download_asset "$GITHUB_REPOSITORY" "$TAG" "AutoSubs-macos-aarch64.app.tar.gz.sig" latest true
+          download_asset "$GITHUB_REPOSITORY" "$TAG" "AutoSubs-macos-x86_64.app.tar.gz.sig" latest true
+          download_asset "$GITHUB_REPOSITORY" "$TAG" "AutoSubs-windows-x86_64.exe.sig" latest false
+          download_asset "$GITHUB_REPOSITORY" "$TAG" "AutoSubs-linux-x86_64.AppImage.sig" latest false
 
           ARM_SIG="$(cat latest/AutoSubs-macos-aarch64.app.tar.gz.sig)"
           INTEL_SIG="$(cat latest/AutoSubs-macos-x86_64.app.tar.gz.sig)"
